@@ -1,0 +1,82 @@
+import { config } from "dotenv-mono";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+import {
+  accountTableRelations,
+  activityTableRelations,
+  githubIntegrationTableRelations,
+  labelTableRelations,
+  notificationTableRelations,
+  projectTableRelations,
+  sessionTableRelations,
+  taskTableRelations,
+  timeEntryTableRelations,
+  userTableRelations,
+  verificationTableRelations,
+  workspaceTableRelations,
+  workspaceUserTableRelations,
+} from "./relations";
+import {
+  accountTable,
+  activityTable,
+  githubIntegrationTable,
+  invitationTable,
+  labelTable,
+  notificationTable,
+  projectTable,
+  sessionTable,
+  taskTable,
+  teamMemberTable,
+  teamTable,
+  timeEntryTable,
+  userTable,
+  verificationTable,
+  workspaceTable,
+  workspaceUserTable,
+} from "./schema";
+
+config();
+
+const pool = new Pool({
+  connectionString:
+    process.env.DATABASE_URL ||
+    "postgresql://zeroqc_user:zeroqc_password@localhost:5432/zeroqc",
+});
+
+export const schema = {
+  accountTable,
+  activityTable,
+  githubIntegrationTable,
+  labelTable,
+  notificationTable,
+  projectTable,
+  sessionTable,
+  taskTable,
+  timeEntryTable,
+  userTable,
+  verificationTable,
+  workspaceTable,
+  workspaceUserTable,
+  invitationTable,
+  teamTable,
+  teamMemberTable,
+  userTableRelations,
+  sessionTableRelations,
+  accountTableRelations,
+  verificationTableRelations,
+  workspaceTableRelations,
+  workspaceUserTableRelations,
+  projectTableRelations,
+  taskTableRelations,
+  timeEntryTableRelations,
+  activityTableRelations,
+  labelTableRelations,
+  notificationTableRelations,
+  githubIntegrationTableRelations,
+};
+
+const db = drizzle(pool, {
+  schema: schema,
+});
+
+export default db;
