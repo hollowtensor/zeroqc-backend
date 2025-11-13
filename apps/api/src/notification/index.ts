@@ -1,9 +1,9 @@
 import { zValidator } from "@hono/zod-validator";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import db from "../database";
-import { taskTable } from "../database/schema";
+import { taskTable, projectTable, workspaceUserTable } from "../database/schema";
 import { subscribeToEvent } from "../events";
 import clearNotifications from "./controllers/clear-notifications";
 import createNotification from "./controllers/create-notification";
@@ -76,25 +76,105 @@ subscribeToEvent(
     taskId,
     userId,
     title,
+    projectId,
   }: {
     taskId: string;
     userId: string;
     title?: string;
+    projectId: string;
     type: string;
     content: string;
   }) => {
-    if (!userId || !taskId) {
+    if (!taskId || !projectId) {
       return;
     }
 
-    await createNotification({
-      userId,
-      title: "New Task Created",
-      content: title ? `Task "${title}" was created` : "A new task was created",
-      type: "task",
-      resourceId: taskId,
-      resourceType: "task",
-    });
+    // Get the workspace ID from the project
+    const project = await db
+      .select({ workspaceId: projectTable.workspaceId })
+      .from(projectTable)
+      .where(eq(projectTable.id, projectId))
+      .limit(1);
+
+    if (!project || project.length === 0) {
+      return;
+    }
+
+    const workspaceId = project[0]?.workspaceId;
+
+    if (!workspaceId) {
+      return;
+    }
+
+    // Get all members of the workspace
+    const workspaceMembers = await db
+      .select({ userId: workspaceUserTable.userId })
+      .from(workspaceUserTable)
+      .where(eq(workspaceUserTable.workspaceId, workspaceId));
+
+    // Create a notification for each workspace member
+    for (const member of workspaceMembers) {
+      // Skip notification for the task creator to avoid duplicate notification
+      // if the creator is also a workspace member
+      if (member.userId !== userId) {
+        await createNotification({
+          userId: member.userId,
+          title: "New Task Created",
+          content: title ? `Task "${title}" was created` : "A new task was created",
+          type: "task",
+          resourceId: taskId,
+          resourceType: "task",
+        });
+      }
+    }
+
+    // Also send notification to the task creator (if they exist)
+    if (userId) {
+      await createNotification({
+        userId,
+        title: "New Task Created",
+        content: title ? `Task "${title}" was created` : "A new task was created",
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+  },
+);
+
+subscribeToEvent(
+  "comment.created",
+  async ({
+    taskId,
+    userId,
+    content,
+  }: {
+    taskId: string;
+    userId: string;
+    content: string;
+  }) => {
+    if (!taskId || !userId) {
+      return;
+    }
+
+    // Get the task to find the assignee
+    const task = await db
+      .select({ userId: taskTable.userId })
+      .from(taskTable)
+      .where(eq(taskTable.id, taskId))
+      .limit(1);
+
+    // If the task has an assignee and it's not the same user who made the comment
+    if (task && task.length > 0 && task[0]?.userId && task[0].userId !== userId) {
+      await createNotification({
+        userId: task[0].userId,
+        title: "New Comment on Your Task",
+        content: `"${content.substring(0, 50)}${content.length > 50 ? '...' : ''}"`,
+        type: "comment",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
   },
 );
 
@@ -138,18 +218,41 @@ subscribeToEvent(
     newStatus: string;
     title: string;
   }) => {
-    if (!taskId || !userId) {
+    if (!taskId) {
       return;
     }
 
-    await createNotification({
-      userId,
-      title: `Task "${title}" moved from ${oldStatus.replace(/-/g, " ")} to ${newStatus.replace(/-/g, " ")}`,
-      type: "task",
-      resourceId: taskId,
-      resourceType: "task",
-    });
+    // Get the task to find the assignee
+    const task = await db
+      .select({ userId: taskTable.userId })
+      .from(taskTable)
+      .where(eq(taskTable.id, taskId))
+      .limit(1);
+
+    // Send notification to the user who changed the status (original behavior)
+    if (userId) {
+      await createNotification({
+        userId,
+        title: `Task "${title}" moved from ${oldStatus.replace(/-/g, " ")} to ${newStatus.replace(/-/g, " ")}`,
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+
+    // Send notification to the task assignee (if they exist and are not the same user who changed the status)
+    if (task && task.length > 0 && task[0]?.userId && userId !== task[0].userId) {
+      await createNotification({
+        userId: task[0].userId,
+        title: `Task "${title}" status changed`,
+        content: `Status changed from ${oldStatus.replace(/-/g, " ")} to ${newStatus.replace(/-/g, " ")}`,
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
   },
+
 );
 
 subscribeToEvent(
@@ -205,6 +308,206 @@ subscribeToEvent(
         title: "Time Tracking Started",
         content: `You started tracking time for task "${task.title}"`,
         type: "time-entry",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+  },
+);
+
+subscribeToEvent(
+  "task.priority_changed",
+  async ({
+    taskId,
+    userId,
+    oldPriority,
+    newPriority,
+    title,
+  }: {
+    taskId: string;
+    userId: string | null;
+    oldPriority: string;
+    newPriority: string;
+    title: string;
+  }) => {
+    if (!taskId) {
+      return;
+    }
+
+    // Get the task to find the assignee
+    const task = await db
+      .select({ userId: taskTable.userId })
+      .from(taskTable)
+      .where(eq(taskTable.id, taskId))
+      .limit(1);
+
+    // Send notification to the user who changed the priority
+    if (userId) {
+      await createNotification({
+        userId,
+        title: `Task "${title}" priority changed`,
+        content: `Priority changed from ${oldPriority} to ${newPriority}`,
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+
+    // Send notification to the task assignee (if they exist and are not the same user who changed the priority)
+    if (task && task.length > 0 && task[0]?.userId && userId !== task[0].userId) {
+      await createNotification({
+        userId: task[0].userId,
+        title: `Task "${title}" priority changed`,
+        content: `Priority changed from ${oldPriority} to ${newPriority}`,
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+  },
+);
+
+subscribeToEvent(
+  "task.due_date_changed",
+  async ({
+    taskId,
+    userId,
+    newDueDate,
+    title,
+  }: {
+    taskId: string;
+    userId: string | null;
+    newDueDate: string;
+    title: string;
+  }) => {
+    if (!taskId) {
+      return;
+    }
+
+    // Get the task to find the assignee
+    const task = await db
+      .select({ userId: taskTable.userId })
+      .from(taskTable)
+      .where(eq(taskTable.id, taskId))
+      .limit(1);
+
+    // Send notification to the user who changed the due date
+    if (userId) {
+      await createNotification({
+        userId,
+        title: `Task "${title}" due date changed`,
+        content: `Due date changed to ${new Date(newDueDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`,
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+
+    // Send notification to the task assignee (if they exist and are not the same user who changed the due date)
+    if (task && task.length > 0 && task[0]?.userId && userId !== task[0].userId) {
+      await createNotification({
+        userId: task[0].userId,
+        title: `Task "${title}" due date changed`,
+        content: `Due date changed to ${new Date(newDueDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`,
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+  },
+);
+
+subscribeToEvent(
+  "task.title_changed",
+  async ({
+    taskId,
+    userId,
+    newTitle,
+    title,
+  }: {
+    taskId: string;
+    userId: string | null;
+    newTitle: string;
+    title: string;
+  }) => {
+    if (!taskId) {
+      return;
+    }
+
+    // Get the task to find the assignee
+    const task = await db
+      .select({ userId: taskTable.userId })
+      .from(taskTable)
+      .where(eq(taskTable.id, taskId))
+      .limit(1);
+
+    // Send notification to the user who changed the title
+    if (userId) {
+      await createNotification({
+        userId,
+        title: `Task title changed to "${newTitle}"`,
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+
+    // Send notification to the task assignee (if they exist and are not the same user who changed the title)
+    if (task && task.length > 0 && task[0]?.userId && userId !== task[0].userId) {
+      await createNotification({
+        userId: task[0].userId,
+        title: `Task "${title}" title changed`,
+        content: `Title changed to "${newTitle}"`,
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+  },
+);
+
+subscribeToEvent(
+  "task.description_changed",
+  async ({
+    taskId,
+    userId,
+    newDescription,
+    title,
+  }: {
+    taskId: string;
+    userId: string | null;
+    newDescription: string;
+    title: string;
+  }) => {
+    if (!taskId) {
+      return;
+    }
+
+    // Get the task to find the assignee
+    const task = await db
+      .select({ userId: taskTable.userId })
+      .from(taskTable)
+      .where(eq(taskTable.id, taskId))
+      .limit(1);
+
+    // Send notification to the user who changed the description
+    if (userId) {
+      await createNotification({
+        userId,
+        title: `Task "${title}" description updated`,
+        type: "task",
+        resourceId: taskId,
+        resourceType: "task",
+      });
+    }
+
+    // Send notification to the task assignee (if they exist and are not the same user who changed the description)
+    if (task && task.length > 0 && task[0]?.userId && userId !== task[0].userId) {
+      await createNotification({
+        userId: task[0].userId,
+        title: `Task "${title}" description updated`,
+        content: `"${newDescription.substring(0, 50)}${newDescription.length > 50 ? '...' : ''}"`,
+        type: "task",
         resourceId: taskId,
         resourceType: "task",
       });
